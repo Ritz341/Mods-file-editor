@@ -1,742 +1,855 @@
 """
-Sunspace  |  Box Header CSV Editor  v6.0  (Streamlit)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Rebuilt for the browser: upload / paste / sample → select rows →
+Sunspace  |  Box Header CSV Editor  v6.0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Desktop app: upload / paste / sample → select rows →
 convert Female Channel → Box Header → download corrected CSV.
 
-Improvements over v5 Tkinter:
-  • Runs in any browser — no Python install needed on user machine
-  • Persistent BYD map editing in sidebar
-  • Live diff preview before download
+Improvements over v5:
+  • Click row to toggle | Shift+click for range | Ctrl+A / Ctrl+D
+  • Female Channel rows auto-highlighted + pre-checked on load
+  • Light / Dark theme toggle
+  • Live search filter (type to narrow rows instantly)
+  • Row count stats bar with live selection counter
   • Undo last conversion
-  • Row-level search / filter
-  • Batch stats dashboard
-  • Cleaner column display with orientation + group badges
+  • Diff log after conversion
+  • Folder memory | corrected_ prefix on save
+  • BYD map editor in popup
 """
 
-import streamlit as st
-import csv, io, os, re, copy, time
-from dataclasses import dataclass, field
-from typing import Optional
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import csv, io, os, re, copy
 
-# ─── PAGE CONFIG ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Sunspace | Box Header CSV Editor v6.0",
-    page_icon="🏭",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ─── CONSTANTS ────────────────────────────────────────────────────────────────
-COL_ID, COL_CODE, COL_INFO = 0, 7, 8
-COL_ORIENT, COL_MAIN       = 13, 25
-COL_DATA1, COL_DATA2        = 28, 29
-
+# ── BYD MAP ───────────────────────────────────────────────────────────────────
 DEFAULT_BYD_MAP = {
-    "810300": ("810311", '3" Female Channel 18\'  White'),
-    "810302": ("810310", '3" Female Channel 18\'  Driftwood'),
-    "810303": ("810309", '3" Female Channel 18\'  Bronze'),
-    "882980": ("882986", '3" Female Channel 18\'  Black'),
-    "810299": ("810311", '3" Female Channel 14\'  White'),
-    "810301": ("810310", '3" Female Channel 14\'  Driftwood'),
+    "810300": "810311",   # 18' White
+    "810302": "810310",   # 18' Driftwood
+    "810303": "810309",   # 18' Bronze
+    "882980": "882986",   # 18' Black
+    "810299": "810311",   # 14' White
+    "810301": "810310",   # 14' Driftwood
+}
+BYD_LABELS = {
+    "810300": '3" Female Channel 18\'  White',
+    "810302": '3" Female Channel 18\'  Driftwood',
+    "810303": '3" Female Channel 18\'  Bronze',
+    "882980": '3" Female Channel 18\'  Black',
+    "810299": '3" Female Channel 14\'  White',
+    "810301": '3" Female Channel 14\'  Driftwood',
 }
 
-SAMPLE_CSV = (
-    "Sep=;\n"
-    "id;ksn;ksnbar;ktn;ktnbar;l;r;code;info;width;height;trolley;box;"
-    "orientation;reinf;reinfbar;pos;prono;offno;customer;date;nccode;"
-    "isfix;colorcode;colorinfo;mainprofile;subcust;image;DATA1;DATA2;DATA3;DATA4;DATA5\n"
-    "1;1;54864;1;25146;90;93;810300;3\" Female Channel 18',WH;0;0;0;0;right;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;S1;Starter;;;\n"
-    "2;1;54864;1;25103;93;90;810300;3\" Female Channel 18',WH;0;0;0;0;leftmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W3;PVC;42 13/16\";54 15/16\";\n"
-    "3;1;54864;1;24493;90;93;810300;3\" Female Channel 18',WH;0;0;0;0;rightmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W3;PVC;42 13/16\";54 15/16\";\n"
-    "4;1;48768;1;10890;90;90;810311;3\" Box Header,16',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810311;Deskin-M400-Room;;W3;Header;42 13/16\";54 15/16\";\n"
-    "5;1;48768;1;10890;90;90;810311;3\" Box Header,16',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810311;Deskin-M400-Room;;W3;Header;42 13/16\";54 15/16\";\n"
-    "6;1;54864;1;24486;93;90;810305;3\" Male Channel 18',WH;0;0;0;0;leftmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810305;Deskin-M400-Room;;W4;PVC;42 13/16\";54 15/16\";\n"
-    "7;1;48768;1;10890;90;90;810300;3\" Female Channel 18',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W4;Header;42 13/16\";54 15/16\";\n"
-    "8;1;48768;1;10890;90;90;810300;3\" Female Channel 18',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W4;Header;42 13/16\";54 15/16\";\n"
-    "9;1;54864;1;23856;93;90;810300;3\" Female Channel 18',WH;0;0;0;0;leftmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W5;PVC;42 13/16\";54 15/16\";\n"
-    "10;1;54864;1;23246;90;93;810302;3\" Female Channel 18',DR;0;0;0;0;rightmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 DR;810302;Deskin-M400-Room;;W5;PVC;42 13/16\";54 15/16\";\n"
-)
+# ── CSV COLUMNS ───────────────────────────────────────────────────────────────
+COL_ID, COL_CODE, COL_INFO = 0, 7, 8
+COL_ORIENT, COL_MAIN       = 13, 25
+COL_DATA1,  COL_DATA2      = 28, 29
+
+# ── THEMES ────────────────────────────────────────────────────────────────────
+DARK = {
+    "bg": "#111111", "bg2": "#1a1a1a", "bg3": "#222222",
+    "border": "#2e2e2e", "text": "#d4d4d4", "text_dim": "#686868",
+    "white": "#ffffff", "amber": "#f0a500", "green": "#4fca80",
+    "red": "#ff6b6b", "blue": "#5db8ff",
+    "dim": "#444444", "dim2": "#303030",
+    "entry_bg": "#0d0d0d", "entry_fg": "#ffffff",
+    "row_fem": "#1a1500",   "fem_fg": "#f0a500",
+    "row_sel": "#0d1f0d",   "sel_fg": "#4fca80",
+    "row_norm": "#111111",  "norm_fg": "#383838",
+    "row_alt": "#141414",
+    "row_converted": "#0a1a2a", "conv_fg": "#5db8ff",
+    "head_bg": "#1e1e1e",   "head_fg": "#888888",
+    "sb_bg": "#1a1a1a",
+}
+LIGHT = {
+    "bg": "#f2f1ec", "bg2": "#e8e7e1", "bg3": "#dddcd6",
+    "border": "#c4c3bc", "text": "#1a1a1a", "text_dim": "#555555",
+    "white": "#ffffff", "amber": "#b07000", "green": "#1a7a40",
+    "red": "#cc3333", "blue": "#2266aa",
+    "dim": "#999999", "dim2": "#d0cfc8",
+    "entry_bg": "#ffffff", "entry_fg": "#1a1a1a",
+    "row_fem": "#fff8e0",   "fem_fg": "#9a6000",
+    "row_sel": "#e2f5e8",   "sel_fg": "#1a7a40",
+    "row_norm": "#f2f1ec",  "norm_fg": "#bbbbbb",
+    "row_alt": "#eeede8",
+    "row_converted": "#e0f0ff", "conv_fg": "#2266aa",
+    "head_bg": "#dddcd6",   "head_fg": "#666666",
+    "sb_bg": "#e8e7e1",
+}
 
 
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
-def safe(row: list, idx: int) -> str:
+# ── CSV HELPERS ───────────────────────────────────────────────────────────────
+def safe(row, idx):
     return row[idx].strip() if idx < len(row) else ""
 
-
-def is_female(row: list) -> bool:
+def is_female(row):
     return safe(row, COL_INFO).startswith('3" Female Channel')
 
-
-def extract_color(info: str) -> str:
+def extract_color(info):
     m = re.search(r",([A-Z]{2})$", info.strip())
     return m.group(1) if m else ""
 
-
-def box_info(color: str) -> str:
+def box_info(color):
     return f'3" Box Header,16\',{color}' if color else '3" Box Header,16\''
 
-
-def parse_csv(raw: str) -> tuple[list, list[list]]:
-    """Parse semicolon-delimited Dealer Desktop CSV. Returns (header, rows)."""
-    hdr = None
-    rows = []
+def parse_csv(raw):
+    hdr = None; rows = []
     for line in raw.splitlines():
         s = line.strip()
-        if not s or s.lower().startswith("sep="):
-            continue
-        fields = s.split(";")
-        if hdr is None:
-            hdr = fields
-        else:
-            rows.append(fields)
+        if not s or s.lower().startswith("sep="): continue
+        f = s.split(";")
+        if hdr is None: hdr = f
+        else: rows.append(f)
     if hdr is None:
-        raise ValueError("No header row found in CSV data.")
+        raise ValueError("No header row found.")
     return hdr, rows
 
-
-def do_convert(
-    hdr: list,
-    rows: list[list],
-    sel_ids: set[str],
-    byd_map: dict[str, str],
-) -> tuple[list[list], list[dict]]:
-    """Convert selected Female Channel rows → Box Header. Returns (new_rows, log)."""
-    out = []
-    log = []
+def do_convert(hdr, rows, sel_ids, byd_map):
+    out = []; log = []
     for row in rows:
         row = list(row)
-        # pad if short
-        needed = max(COL_CODE, COL_INFO, COL_MAIN) + 1
-        while len(row) < needed:
-            row.append("")
-
+        while len(row) <= max(COL_CODE, COL_INFO, COL_MAIN): row.append("")
         rid = safe(row, COL_ID)
         if rid in sel_ids and is_female(row):
-            old_code = safe(row, COL_CODE)
-            new_code = byd_map.get(old_code, "")
-            color = extract_color(safe(row, COL_INFO))
-            row[COL_INFO] = box_info(color)
-            row[COL_CODE] = new_code or old_code
-            row[COL_MAIN] = new_code or row[COL_MAIN]
-            log.append({"ok": bool(new_code), "id": rid, "old": old_code, "new": new_code})
+            old = safe(row, COL_CODE); new = byd_map.get(old, "")
+            old_info = safe(row, COL_INFO)
+            row[COL_INFO] = box_info(extract_color(old_info))
+            row[COL_CODE] = new or old
+            row[COL_MAIN] = new or row[COL_MAIN]
+            log.append({"ok": bool(new), "id": rid, "old": old,
+                         "new": new, "old_info": old_info,
+                         "new_info": row[COL_INFO]})
         out.append(row)
     return out, log
 
-
-def rows_to_csv(hdr: list, rows: list[list]) -> str:
+def write_csv(hdr, rows):
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(hdr)
-    for r in rows:
-        w.writerow(r)
+    for r in rows: w.writerow(r)
     return buf.getvalue()
 
 
-def color_badge(code: str) -> str:
-    """Return a colored dot for known color suffixes."""
-    colors = {
-        "WH": "⚪", "DR": "🟤", "BZ": "🟠", "BK": "⚫",
-        "White": "⚪", "Driftwood": "🟤", "Bronze": "🟠", "Black": "⚫",
-    }
-    return colors.get(code, "")
+# ── MAIN APP ──────────────────────────────────────────────────────────────────
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Sunspace  |  Box Header CSV Editor  v6.0")
+        self.geometry("1200x860")
+        self.minsize(960, 680)
 
+        self._tn  = "dark"
+        self.T    = DARK
+        self.hdr  = None
+        self.rows = []
+        self.rows_backup = None      # for undo
+        self.selected    = set()     # set of row-IDs (strings)
+        self.female_ids  = set()
+        self.converted_ids = set()   # rows that were converted (for colouring)
+        self.id_to_row   = {}
+        self.id_to_idx   = {}        # row-ID → integer index in self.rows
+        self.iid_list    = []        # ALL treeview iids in data order
+        self.visible_iids = []       # currently visible iids (after filter)
+        self.last_click  = None
+        self.output_csv  = ""
+        self.convert_log = []
+        self.source_file = ""
+        self.last_dir    = os.path.expanduser("~")
+        self.byd_vars    = {}
+        self.status_var  = tk.StringVar(value="No file loaded.")
+        self.filter_var  = tk.StringVar()
+        self.filter_var.trace_add("write", self._on_filter_changed)
+        self._filter_after_id = None  # for debounce
 
-def orientation_label(orient: str) -> str:
-    """Friendly orientation display."""
-    labels = {
-        "right": "→ Right",
-        "left": "← Left",
-        "rightmod": "→ Right Mod",
-        "leftmod": "← Left Mod",
-        "header": "▬ Header",
-    }
-    return labels.get(orient.lower(), orient)
+        self._init_byd_vars()
+        self._build()
+        self._apply_theme()
 
+    def _init_byd_vars(self):
+        for k, v in DEFAULT_BYD_MAP.items():
+            self.byd_vars[k] = tk.StringVar(value=v)
 
-# ─── SESSION STATE INIT ──────────────────────────────────────────────────────
-def init_state():
-    defaults = {
-        "hdr": None,
-        "rows": [],
-        "rows_backup": None,       # for undo
-        "selected": set(),
-        "female_ids": set(),
-        "source_name": "",
-        "output_csv": "",
-        "convert_log": [],
-        "converted": False,
-        "byd_map": {k: v[0] for k, v in DEFAULT_BYD_MAP.items()},
-        "filter_text": "",
-        "show_only_female": False,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    def _byd_map(self):
+        return {k: v.get().strip() for k, v in self.byd_vars.items()}
 
+    # ── THEME ─────────────────────────────────────────────────────────────────
+    def _toggle_theme(self):
+        self._tn = "light" if self._tn == "dark" else "dark"
+        self.T = LIGHT if self._tn == "light" else DARK
+        self.theme_btn.config(
+            text="🌙  Dark" if self._tn == "light" else "☀  Light")
+        self._apply_theme()
+        self._refresh_tree()
 
-init_state()
+    def _apply_theme(self):
+        T = self.T
+        self.configure(bg=T["bg"])
 
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("T.Treeview",
+                        background=T["bg"], foreground=T["norm_fg"],
+                        fieldbackground=T["bg"], rowheight=26,
+                        borderwidth=0, font=("Courier New", 9))
+        style.configure("T.Treeview.Heading",
+                        background=T["head_bg"], foreground=T["head_fg"],
+                        borderwidth=0, relief="flat",
+                        font=("Courier New", 8, "bold"))
+        style.map("T.Treeview",
+                  background=[("selected", T["bg"])],
+                  foreground=[("selected", T["text"])])
+        style.configure("TScrollbar",
+                        background=T["bg2"], troughcolor=T["bg"],
+                        arrowcolor=T["dim"])
 
-# ─── INGEST ───────────────────────────────────────────────────────────────────
-def ingest(raw: str, source_name: str = "pasted content"):
-    hdr, rows = parse_csv(raw)
-    st.session_state.hdr = hdr
-    st.session_state.rows = rows
-    st.session_state.rows_backup = None
-    st.session_state.source_name = source_name
-    st.session_state.output_csv = ""
-    st.session_state.convert_log = []
-    st.session_state.converted = False
+        if hasattr(self, "tree"):
+            self.tree.tag_configure("female",
+                background=T["row_fem"], foreground=T["fem_fg"])
+            self.tree.tag_configure("sel",
+                background=T["row_sel"], foreground=T["sel_fg"])
+            self.tree.tag_configure("norm",
+                background=T["row_norm"], foreground=T["norm_fg"])
+            self.tree.tag_configure("alt",
+                background=T["row_alt"], foreground=T["norm_fg"])
+            self.tree.tag_configure("converted",
+                background=T["row_converted"], foreground=T["conv_fg"])
 
-    female_ids = set()
-    for i, row in enumerate(rows):
-        rid = safe(row, COL_ID) or str(i)
-        if is_female(row):
-            female_ids.add(rid)
+        self._recolour(self)
 
-    st.session_state.female_ids = female_ids
-    st.session_state.selected = set(female_ids)  # auto-select all female
-
-
-# ─── CUSTOM CSS ───────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    /* ── Header bar ── */
-    .sunspace-header {
-        background: linear-gradient(135deg, #111 0%, #1a1a1a 100%);
-        border-bottom: 3px solid #f0a500;
-        padding: 1rem 1.5rem;
-        margin: -1rem -1rem 1.5rem -1rem;
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-    }
-    .sunspace-badge {
-        background: #f0a500;
-        color: #000;
-        font-family: 'Courier New', monospace;
-        font-weight: 800;
-        font-size: 0.75rem;
-        padding: 0.3rem 0.6rem;
-        letter-spacing: 0.05em;
-    }
-    .sunspace-title {
-        color: #fff;
-        font-family: 'Courier New', monospace;
-        font-size: 1.25rem;
-        font-weight: 700;
-        letter-spacing: 0.03em;
-    }
-    .sunspace-sub {
-        color: #686868;
-        font-family: 'Courier New', monospace;
-        font-size: 0.7rem;
-    }
-
-    /* ── Stats chips ── */
-    .stat-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-    .stat-chip {
-        font-family: 'Courier New', monospace;
-        font-size: 0.8rem;
-        padding: 0.35rem 0.75rem;
-        border-radius: 4px;
-        font-weight: 600;
-    }
-    .chip-total  { background: #1e1e1e; color: #888; }
-    .chip-female { background: #1a1500; color: #f0a500; }
-    .chip-sel    { background: #0d1f0d; color: #4fca80; }
-    .chip-warn   { background: #2a1a00; color: #ff8c00; }
-
-    /* ── Table styling ── */
-    .row-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-family: 'Courier New', monospace;
-        font-size: 0.82rem;
-    }
-    .row-table th {
-        background: #1a1a1a;
-        color: #686868;
-        text-align: left;
-        padding: 0.5rem 0.6rem;
-        font-size: 0.7rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        border-bottom: 1px solid #2e2e2e;
-        position: sticky;
-        top: 0;
-        z-index: 1;
-    }
-    .row-table td {
-        padding: 0.4rem 0.6rem;
-        border-bottom: 1px solid #1a1a1a;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        max-width: 300px;
-    }
-    .row-female    { background: #1a1500; color: #f0a500; }
-    .row-selected  { background: #0d1f0d; color: #4fca80; }
-    .row-normal    { background: #111; color: #555; }
-    .row-alt       { background: #141414; color: #555; }
-    .row-converted { background: #0a1a2a; color: #5db8ff; }
-
-    .orient-badge {
-        display: inline-block;
-        padding: 0.15rem 0.45rem;
-        border-radius: 3px;
-        font-size: 0.72rem;
-        font-weight: 600;
-    }
-    .orient-right    { background: #1a2a1a; color: #4fca80; }
-    .orient-left     { background: #1a1a2a; color: #7a9fff; }
-    .orient-header   { background: #2a2a1a; color: #d4b44a; }
-    .orient-default  { background: #1e1e1e; color: #666; }
-
-    .profile-tag {
-        display: inline-block;
-        padding: 0.1rem 0.4rem;
-        border-radius: 3px;
-        font-size: 0.72rem;
-    }
-    .tag-female { background: #2a2000; color: #f0a500; }
-    .tag-box    { background: #002a1a; color: #4fca80; }
-    .tag-male   { background: #1a1a2a; color: #7a9fff; }
-    .tag-other  { background: #1e1e1e; color: #666; }
-
-    /* ── Diff table ── */
-    .diff-table { width: 100%; border-collapse: collapse; font-family: 'Courier New', monospace; font-size: 0.8rem; }
-    .diff-table th { background: #1a1a1a; color: #686868; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.7rem; border-bottom: 1px solid #2e2e2e; }
-    .diff-table td { padding: 0.35rem 0.6rem; border-bottom: 1px solid #1a1a1a; }
-    .diff-old { color: #ff6b6b; text-decoration: line-through; }
-    .diff-new { color: #4fca80; font-weight: 700; }
-    .diff-warn { color: #ff8c00; }
-
-    /* ── Scrollable container ── */
-    .table-scroll {
-        max-height: 520px;
-        overflow-y: auto;
-        border: 1px solid #2e2e2e;
-        border-radius: 4px;
-    }
-
-    /* ── Sidebar styling ── */
-    .byd-label { font-family: 'Courier New', monospace; font-size: 0.78rem; color: #999; }
-    .byd-arrow { color: #f0a500; font-weight: 700; }
-
-    /* ── Reduce Streamlit default padding ── */
-    .block-container { padding-top: 1rem; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ─── HEADER ───────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="sunspace-header">
-    <span class="sunspace-badge">SUNSPACE</span>
-    <div>
-        <div class="sunspace-title">BOX HEADER CSV EDITOR</div>
-        <div class="sunspace-sub">DEALER DESKTOP → SC220  |  v6.0 Streamlit</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-
-# ─── SIDEBAR: BYD MAP ────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 🔧 BYD Code Mapping")
-    st.caption("Female Channel → Box Header code translation")
-
-    byd = st.session_state.byd_map
-    for old_code, (default_new, label) in DEFAULT_BYD_MAP.items():
-        col1, col2, col3 = st.columns([2.5, 0.5, 1.5])
-        with col1:
-            st.markdown(f"<div class='byd-label'>{label}</div>", unsafe_allow_html=True)
-            st.code(old_code, language=None)
-        with col2:
-            st.markdown("<div class='byd-arrow' style='padding-top:1.6rem;text-align:center;'>→</div>", unsafe_allow_html=True)
-        with col3:
-            new_val = st.text_input(
-                f"Box Header BYD for {old_code}",
-                value=byd.get(old_code, default_new),
-                key=f"byd_{old_code}",
-                label_visibility="collapsed",
-            )
-            byd[old_code] = new_val.strip()
-
-    st.divider()
-    if st.button("🔄 Reset to Defaults", use_container_width=True):
-        st.session_state.byd_map = {k: v[0] for k, v in DEFAULT_BYD_MAP.items()}
-        st.rerun()
-
-    st.divider()
-    st.markdown("### ⚡ Shortcuts")
-    st.markdown("""
-    - **Select All Female** — button above table
-    - **Deselect All** — button above table
-    - **Filter** — search by profile, orientation, group
-    - **Undo** — revert last conversion
-    """)
-
-
-# ─── INPUT SECTION ────────────────────────────────────────────────────────────
-st.markdown("#### 📂 Load CSV Data")
-input_tabs = st.tabs(["⬆ Upload File", "📋 Paste CSV", "🧪 Sample Data"])
-
-with input_tabs[0]:
-    uploaded = st.file_uploader(
-        "Upload Dealer Desktop CSV",
-        type=["csv", "txt"],
-        help="Semicolon-delimited CSV exported from Dealer Desktop",
-    )
-    if uploaded:
-        raw = uploaded.read().decode("utf-8", errors="replace")
+    def _recolour(self, widget):
+        T = self.T
+        cls = widget.__class__.__name__
         try:
-            ingest(raw, source_name=uploaded.name)
-            st.success(f"Loaded **{uploaded.name}** — {len(st.session_state.rows)} rows")
-        except Exception as e:
-            st.error(f"Parse error: {e}")
+            if cls in ("Frame", "Label"):
+                widget.configure(bg=T["bg"])
+            if cls == "Label":
+                fg = widget._sunspace_fg if hasattr(widget, "_sunspace_fg") else T["text_dim"]
+                widget.configure(fg=fg(T) if callable(fg) else fg)
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._recolour(child)
 
-with input_tabs[1]:
-    pasted = st.text_area(
-        "Paste CSV content here",
-        height=180,
-        placeholder="Paste semicolon-delimited CSV from Dealer Desktop...",
-    )
-    if st.button("Load Pasted CSV", type="primary"):
-        if pasted.strip():
-            try:
-                ingest(pasted.strip())
-                st.success(f"Loaded pasted content — {len(st.session_state.rows)} rows")
-            except Exception as e:
-                st.error(f"Parse error: {e}")
-        else:
-            st.warning("Nothing to paste.")
+    # ── BUILD ─────────────────────────────────────────────────────────────────
+    def _build(self):
+        T = self.T
 
-with input_tabs[2]:
-    st.caption("Load sample Dealer Desktop data to test the editor.")
-    if st.button("Load Sample Data", type="secondary"):
-        ingest(SAMPLE_CSV, source_name="sample_data.csv")
-        st.success(f"Loaded sample — {len(st.session_state.rows)} rows")
-        st.rerun()
+        # Header bar
+        hbar = tk.Frame(self, bg=T["bg3"], height=52)
+        hbar.pack(fill="x"); hbar.pack_propagate(False)
+        tk.Label(hbar, text="SUNSPACE", bg=T["amber"], fg="black",
+                 font=("Courier New", 9, "bold"), padx=8
+                 ).pack(side="left", padx=12, pady=12)
+        inf = tk.Frame(hbar, bg=T["bg3"]); inf.pack(side="left")
+        tk.Label(inf, text="BOX HEADER CSV EDITOR",
+                 bg=T["bg3"], fg=T["white"],
+                 font=("Courier New", 13, "bold")).pack(anchor="w")
+        tk.Label(inf, text="DEALER DESKTOP  ->  SC220  |  v6.0",
+                 bg=T["bg3"], fg=T["text_dim"],
+                 font=("Courier New", 8)).pack(anchor="w")
+        self.theme_btn = tk.Button(hbar, text="☀  Light",
+                  bg=T["bg2"], fg=T["text_dim"], relief="flat",
+                  font=("Courier New", 9), cursor="hand2",
+                  padx=10, pady=4, command=self._toggle_theme)
+        self.theme_btn.pack(side="right", padx=12)
 
-# ─── EARLY EXIT IF NO DATA ───────────────────────────────────────────────────
-if not st.session_state.rows:
-    st.info("Upload, paste, or load sample CSV data to get started.")
-    st.stop()
+        # Amber line
+        tk.Frame(self, bg=T["amber"], height=2).pack(fill="x")
 
-# ─── STATS CHIPS ──────────────────────────────────────────────────────────────
-rows = st.session_state.rows
-female_ids = st.session_state.female_ids
-selected = st.session_state.selected
+        # Toolbar
+        tb = tk.Frame(self, bg=T["bg2"], pady=7, padx=12); tb.pack(fill="x")
+        self._btn(tb, "↑  UPLOAD CSV", T["amber"], "black",
+                  self._open).pack(side="left", padx=(0, 6))
+        self._btn(tb, "PASTE", T["bg3"], T["text_dim"],
+                  self._paste).pack(side="left", padx=(0, 6))
+        self._btn(tb, "SAMPLE", T["bg2"], T["dim"],
+                  self._sample).pack(side="left", padx=(0, 16))
+        tk.Frame(tb, bg=T["dim2"], width=1, height=24
+                 ).pack(side="left", padx=8, pady=2)
+        self._btn(tb, "BYD MAP", T["bg3"], T["text_dim"],
+                  self._byd_window).pack(side="left", padx=(8, 0))
+        self._btn(tb, "CLEAR", T["bg2"], T["dim"],
+                  self._clear).pack(side="right")
 
-total = len(rows)
-n_female = len(female_ids)
-n_sel = len(selected)
+        # Selection + filter bar
+        cb = tk.Frame(self, bg=T["bg3"], pady=5, padx=12); cb.pack(fill="x")
 
-st.markdown(f"""
-<div class="stat-row">
-    <span class="stat-chip chip-total">TOTAL: {total}</span>
-    <span class="stat-chip chip-female">FEMALE CHANNEL: {n_female}</span>
-    <span class="stat-chip chip-sel">SELECTED: {n_sel}</span>
-    {'<span class="stat-chip chip-warn">⚠ CONVERTED — review diff below</span>' if st.session_state.converted else ''}
-</div>
-""", unsafe_allow_html=True)
+        self._btn(cb, "☑  ALL FEMALE", T["bg2"], T["fem_fg"],
+                  self._sel_all_female).pack(side="left", padx=(0, 6))
+        self._btn(cb, "☐  DESELECT ALL", T["bg2"], T["dim"],
+                  self._deselect_all).pack(side="left", padx=(0, 12))
 
+        # Filter entry
+        tk.Label(cb, text="🔍", bg=T["bg3"], fg=T["text_dim"],
+                 font=("Courier New", 10)).pack(side="left", padx=(8, 2))
+        self.filter_entry = tk.Entry(cb, textvariable=self.filter_var,
+                 bg=T["entry_bg"], fg=T["entry_fg"],
+                 insertbackground=T["text"], relief="flat",
+                 font=("Courier New", 9),
+                 highlightthickness=1, highlightbackground=T["border"],
+                 width=28)
+        self.filter_entry.pack(side="left", padx=(0, 4), ipady=3)
+        self.filter_clear_btn = self._btn(cb, "✕", T["bg3"], T["dim"],
+                  self._clear_filter)
+        self.filter_clear_btn.pack(side="left", padx=(0, 8))
 
-# ─── SELECTION CONTROLS + FILTER ──────────────────────────────────────────────
-ctrl_cols = st.columns([1, 1, 1, 2])
+        tk.Label(cb, text="SHIFT+CLICK = range  |  CTRL+A = all female  |  CTRL+D = deselect",
+                 bg=T["bg3"], fg=T["dim"],
+                 font=("Courier New", 8)).pack(side="left", padx=(8, 0))
 
-with ctrl_cols[0]:
-    if st.button("☑ Select All Female", use_container_width=True):
-        st.session_state.selected = set(female_ids)
-        st.rerun()
+        self.counts_lbl = tk.Label(cb, text="",
+                                   bg=T["bg3"], fg=T["text_dim"],
+                                   font=("Courier New", 9, "bold"))
+        self.counts_lbl.pack(side="right")
 
-with ctrl_cols[1]:
-    if st.button("☐ Deselect All", use_container_width=True):
-        st.session_state.selected = set()
-        st.rerun()
+        # Treeview
+        tf = tk.Frame(self, bg=T["bg"]); tf.pack(fill="both", expand=True)
 
-with ctrl_cols[2]:
-    show_female = st.checkbox("Show only Female Channel", value=st.session_state.show_only_female)
-    st.session_state.show_only_female = show_female
+        vsb = ttk.Scrollbar(tf, orient="vertical")
+        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(tf, orient="horizontal")
+        hsb.pack(side="bottom", fill="x")
 
-with ctrl_cols[3]:
-    filter_text = st.text_input(
-        "🔍 Filter rows",
-        value=st.session_state.filter_text,
-        placeholder="Search profile, orientation, group, BYD...",
-        label_visibility="collapsed",
-    )
-    st.session_state.filter_text = filter_text
+        cols = ("chk", "num", "group", "orient", "profile", "byd", "data2", "rest")
+        self.tree = ttk.Treeview(tf, columns=cols, show="headings",
+                                 style="T.Treeview",
+                                 yscrollcommand=vsb.set,
+                                 xscrollcommand=hsb.set,
+                                 selectmode="none")
+        vsb.config(command=self.tree.yview)
+        hsb.config(command=self.tree.xview)
 
+        heads = [("chk","✓",36), ("num","#",44), ("group","GROUP",60),
+                 ("orient","ORIENTATION",110), ("profile","PROFILE NAME",300),
+                 ("byd","BYD",72), ("data2","TYPE",80), ("rest","...",400)]
+        for cid, txt, w in heads:
+            self.tree.heading(cid, text=txt)
+            self.tree.column(cid, width=w, minwidth=w,
+                             stretch=(cid == "rest"), anchor="w")
 
-# ─── ROW TABLE ────────────────────────────────────────────────────────────────
-def get_orient_class(orient: str) -> str:
-    o = orient.lower()
-    if "right" in o: return "orient-right"
-    if "left" in o: return "orient-left"
-    if "header" in o: return "orient-header"
-    return "orient-default"
+        self.tree.tag_configure("female",    background=T["row_fem"],  foreground=T["fem_fg"])
+        self.tree.tag_configure("sel",       background=T["row_sel"],  foreground=T["sel_fg"])
+        self.tree.tag_configure("norm",      background=T["row_norm"], foreground=T["norm_fg"])
+        self.tree.tag_configure("alt",       background=T["row_alt"],  foreground=T["norm_fg"])
+        self.tree.tag_configure("converted", background=T["row_converted"], foreground=T["conv_fg"])
 
-def get_profile_tag(info: str) -> tuple[str, str]:
-    if info.startswith('3" Female Channel'): return "tag-female", "FEM"
-    if info.startswith('3" Box Header'): return "tag-box", "BOX"
-    if info.startswith('3" Male Channel'): return "tag-male", "MALE"
-    return "tag-other", ""
+        self.tree.bind("<Button-1>",        self._on_click)
+        self.tree.bind("<Shift-Button-1>",  self._on_shift_click)
+        self.tree.bind("<Control-a>",       lambda e: self._sel_all_female())
+        self.tree.bind("<Control-A>",       lambda e: self._sel_all_female())
+        self.tree.bind("<Control-d>",       lambda e: self._deselect_all())
+        self.tree.bind("<Control-D>",       lambda e: self._deselect_all())
+        self.tree.pack(fill="both", expand=True)
 
-def build_table_html(rows, female_ids, selected, filter_text, show_only_female):
-    html_rows = []
-    ft = filter_text.lower().strip()
+        # Action bar
+        ab = tk.Frame(self, bg=T["bg2"], pady=8, padx=12); ab.pack(fill="x")
+        self.convert_btn = self._btn(ab, "FEMALE  ->  BOX HEADER",
+                                     T["dim2"], T["dim"], self._convert)
+        self.convert_btn.config(state="disabled")
+        self.convert_btn.pack(side="left", padx=(0, 8))
 
-    for i, row in enumerate(rows):
-        rid = safe(row, COL_ID) or str(i)
-        info = safe(row, COL_INFO)
-        orient = safe(row, COL_ORIENT)
-        code = safe(row, COL_CODE)
-        group = safe(row, COL_DATA1)
-        rtype = safe(row, COL_DATA2)
+        self.undo_btn = self._btn(ab, "↩  UNDO", T["bg3"], T["dim"], self._undo)
+        self.undo_btn.config(state="disabled")
+        self.undo_btn.pack(side="left", padx=(0, 8))
 
-        # filter
-        if show_only_female and rid not in female_ids:
-            continue
-        if ft:
-            searchable = f"{info} {orient} {code} {group} {rtype}".lower()
-            if ft not in searchable:
+        self.dl_btn = self._btn(ab, "↓  DOWNLOAD CSV",
+                                T["green"], "black", self._download)
+        self.dl_btn.config(state="disabled")
+        self.dl_btn.pack(side="left", padx=(0, 8))
+
+        self.cp_btn = self._btn(ab, "COPY TO CLIPBOARD",
+                                T["bg3"], T["text_dim"], self._copy)
+        self.cp_btn.config(state="disabled")
+        self.cp_btn.pack(side="left")
+
+        self.result_lbl = tk.Label(ab, text="",
+                                   bg=T["bg2"], fg=T["text_dim"],
+                                   font=("Courier New", 9))
+        self.result_lbl.pack(side="left", padx=14)
+
+        # Status bar
+        tk.Frame(self, bg=T["border"], height=1).pack(fill="x")
+        sb = tk.Frame(self, bg=T["bg3"], pady=4, padx=12); sb.pack(fill="x")
+        tk.Label(sb, textvariable=self.status_var,
+                 bg=T["bg3"], fg=T["text_dim"],
+                 font=("Courier New", 9)).pack(side="left")
+
+    # ── FILTER ────────────────────────────────────────────────────────────────
+    def _on_filter_changed(self, *_args):
+        """Debounced filter: wait 150ms after last keystroke."""
+        if self._filter_after_id:
+            self.after_cancel(self._filter_after_id)
+        self._filter_after_id = self.after(150, self._apply_filter)
+
+    def _clear_filter(self):
+        self.filter_var.set("")
+
+    def _apply_filter(self):
+        """Show/hide treeview rows based on filter text."""
+        self._filter_after_id = None
+        ft = self.filter_var.get().strip().lower()
+
+        # Detach all, then re-attach matching
+        for iid in self.iid_list:
+            self.tree.detach(iid)
+
+        self.visible_iids = []
+        for iid in self.iid_list:
+            row = self.id_to_row.get(iid)
+            if not row:
+                continue
+            if ft:
+                searchable = (
+                    f"{safe(row, COL_INFO)} {safe(row, COL_ORIENT)} "
+                    f"{safe(row, COL_CODE)} {safe(row, COL_DATA1)} "
+                    f"{safe(row, COL_DATA2)}"
+                ).lower()
+                if ft not in searchable:
+                    continue
+            self.tree.move(iid, "", "end")
+            self.visible_iids.append(iid)
+
+        self._refresh_tags()
+        self._update_counts()
+
+    def _refresh_tags(self):
+        """Reapply tags to all visible rows (handles alternating + state)."""
+        for vis_idx, iid in enumerate(self.visible_iids):
+            rid = iid
+            row = self.id_to_row.get(rid)
+            if not row:
                 continue
 
-        # row class
-        is_sel = rid in selected
-        is_fem = rid in female_ids
-        if is_sel:
-            row_cls = "row-selected"
-        elif is_fem:
-            row_cls = "row-female"
-        elif i % 2 == 0:
-            row_cls = "row-normal"
+            # Determine tag
+            if rid in self.converted_ids:
+                tag = "converted"
+            elif rid in self.selected:
+                tag = "sel"
+            elif rid in self.female_ids:
+                tag = "female"
+            elif vis_idx % 2 == 0:
+                tag = "norm"
+            else:
+                tag = "alt"
+
+            self.tree.item(iid, tags=(tag,))
+
+            # Update checkbox + profile columns
+            if rid in self.female_ids:
+                chk = "☑" if rid in self.selected else "☐"
+            else:
+                chk = ""
+
+            prof = safe(row, COL_INFO)
+            self.tree.set(iid, "chk", chk)
+            self.tree.set(iid, "profile", prof[:50])
+
+    # ── TREEVIEW HELPERS ──────────────────────────────────────────────────────
+    def _refresh_tree(self):
+        """Full refresh of tags and display values for visible rows."""
+        self._refresh_tags()
+
+    def _update_counts(self):
+        sel = len(self.selected)
+        fem = len(self.female_ids)
+        tot = len(self.rows)
+        vis = len(self.visible_iids)
+
+        filter_note = f"   Showing: {vis}" if vis != tot else ""
+        self.counts_lbl.config(
+            text=f"Total: {tot}   Female: {fem}   Selected: {sel}{filter_note}   ")
+
+        if sel > 0:
+            self.convert_btn.config(
+                state="normal", bg=self.T["amber"], fg="black",
+                text=f"FEMALE  ->  BOX HEADER  ({sel} rows)")
         else:
-            row_cls = "row-alt"
+            self.convert_btn.config(
+                state="disabled", bg=self.T["dim2"], fg=self.T["dim"],
+                text="FEMALE  ->  BOX HEADER")
 
-        # checkbox display
-        chk = "☑" if is_sel else ("☐" if is_fem else "·")
+    # ── CLICK HANDLERS ────────────────────────────────────────────────────────
+    def _on_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid or iid not in self.female_ids:
+            return
+        # Don't allow selection changes on already-converted rows
+        if iid in self.converted_ids:
+            return
+        if iid in self.selected:
+            self.selected.discard(iid)
+        else:
+            self.selected.add(iid)
+        self.last_click = iid
+        self._refresh_tree()
+        self._update_counts()
 
-        # orient badge
-        orient_cls = get_orient_class(orient)
-        orient_html = f'<span class="orient-badge {orient_cls}">{orientation_label(orient)}</span>'
+    def _on_shift_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid or iid not in self.female_ids:
+            return
+        if iid in self.converted_ids:
+            return
 
-        # profile tag
-        tag_cls, tag_txt = get_profile_tag(info)
-        tag_html = f'<span class="profile-tag {tag_cls}">{tag_txt}</span> ' if tag_txt else ""
+        # Use visible_iids for range so filter is respected
+        ref_list = self.visible_iids
 
-        color = extract_color(info)
-        color_dot = color_badge(color)
+        if self.last_click and self.last_click in ref_list:
+            a = ref_list.index(self.last_click)
+            b = ref_list.index(iid)
+            lo, hi = min(a, b), max(a, b)
+            for i_iid in ref_list[lo:hi+1]:
+                if i_iid in self.female_ids and i_iid not in self.converted_ids:
+                    self.selected.add(i_iid)
+        else:
+            self.selected.add(iid)
+        self.last_click = iid
+        self._refresh_tree()
+        self._update_counts()
 
-        html_rows.append(
-            f'<tr class="{row_cls}">'
-            f'<td>{chk}</td>'
-            f'<td>{str(i+1).zfill(3)}</td>'
-            f'<td>{group}</td>'
-            f'<td>{orient_html}</td>'
-            f'<td>{tag_html}{info[:50]} {color_dot}</td>'
-            f'<td>{code}</td>'
-            f'<td>{rtype}</td>'
-            f'</tr>'
+    # ── SELECTION BUTTONS ─────────────────────────────────────────────────────
+    def _sel_all_female(self):
+        """Select all female rows that haven't been converted yet."""
+        for rid in self.female_ids:
+            if rid not in self.converted_ids:
+                self.selected.add(rid)
+        self._refresh_tree()
+        self._update_counts()
+
+    def _deselect_all(self):
+        """Deselect all (only non-converted rows are affected visually)."""
+        self.selected.clear()
+        self._refresh_tree()
+        self._update_counts()
+
+    # ── LOAD ──────────────────────────────────────────────────────────────────
+    def _open(self):
+        path = filedialog.askopenfilename(
+            title="Open Dealer Desktop CSV",
+            initialdir=self.last_dir,
+            filetypes=[("CSV / Text", "*.csv *.txt"), ("All files", "*.*")])
+        if not path: return
+        self.last_dir = os.path.dirname(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            self._ingest(f.read(), source=path)
+
+    def _paste(self):
+        T = self.T
+        dlg = tk.Toplevel(self); dlg.title("Paste CSV")
+        dlg.configure(bg=T["bg"]); dlg.geometry("740x420"); dlg.grab_set()
+        tk.Label(dlg, text="Paste Dealer Desktop CSV content:",
+                 bg=T["bg"], fg=T["text_dim"],
+                 font=("Courier New", 9)).pack(anchor="w", padx=14, pady=(12, 4))
+        txt = tk.Text(dlg, bg=T["entry_bg"], fg=T["text"],
+                      insertbackground=T["text"],
+                      font=("Courier New", 9), relief="flat",
+                      highlightthickness=1, highlightbackground=T["border"])
+        txt.pack(fill="both", expand=True, padx=14)
+        def _go():
+            c = txt.get("1.0", "end").strip()
+            if c: self._ingest(c)
+            dlg.destroy()
+        row = tk.Frame(dlg, bg=T["bg"], pady=8, padx=14); row.pack(fill="x")
+        self._btn(row, "LOAD", T["amber"], "black", _go).pack(side="left", padx=(0,8))
+        self._btn(row, "CANCEL", T["bg3"], T["dim"], dlg.destroy).pack(side="left")
+
+    def _sample(self):
+        s = (
+            "Sep=;\n"
+            "id;ksn;ksnbar;ktn;ktnbar;l;r;code;info;width;height;trolley;box;"
+            "orientation;reinf;reinfbar;pos;prono;offno;customer;date;nccode;"
+            "isfix;colorcode;colorinfo;mainprofile;subcust;image;DATA1;DATA2;DATA3;DATA4;DATA5\n"
+            "1;1;54864;1;25146;90;93;810300;3\" Female Channel 18',WH;0;0;0;0;right;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;S1;Starter;;;\n"
+            "2;1;54864;1;25103;93;90;810300;3\" Female Channel 18',WH;0;0;0;0;leftmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W3;PVC;42 13/16\";54 15/16\";\n"
+            "3;1;54864;1;24493;90;93;810300;3\" Female Channel 18',WH;0;0;0;0;rightmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W3;PVC;42 13/16\";54 15/16\";\n"
+            "4;1;48768;1;10890;90;90;810311;3\" Box Header,16',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810311;Deskin-M400-Room;;W3;Header;42 13/16\";54 15/16\";\n"
+            "5;1;48768;1;10890;90;90;810311;3\" Box Header,16',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810311;Deskin-M400-Room;;W3;Header;42 13/16\";54 15/16\";\n"
+            "6;1;54864;1;24486;93;90;810305;3\" Male Channel 18',WH;0;0;0;0;leftmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810305;Deskin-M400-Room;;W4;PVC;42 13/16\";54 15/16\";\n"
+            "7;1;48768;1;10890;90;90;810300;3\" Female Channel 18',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W4;Header;42 13/16\";54 15/16\";\n"
+            "8;1;48768;1;10890;90;90;810300;3\" Female Channel 18',WH;0;0;0;0;header;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W4;Header;42 13/16\";54 15/16\";\n"
+            "9;1;54864;1;23856;93;90;810300;3\" Female Channel 18',WH;0;0;0;0;leftmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 White;810300;Deskin-M400-Room;;W5;PVC;42 13/16\";54 15/16\";\n"
+            "10;1;54864;1;23246;90;93;810302;3\" Female Channel 18',DR;0;0;0;0;rightmod;0;0;0;0;0;Sunroom Designs;3/12/2026;;0;1;1 DR;810302;Deskin-M400-Room;;W5;PVC;42 13/16\";54 15/16\";\n"
         )
+        self._ingest(s)
 
-    if not html_rows:
-        html_rows.append('<tr><td colspan="7" style="text-align:center;color:#555;padding:2rem;">No rows match filter.</td></tr>')
+    def _ingest(self, raw, source=""):
+        try:
+            hdr, rows = parse_csv(raw)
+        except Exception as ex:
+            messagebox.showerror("Parse Error", str(ex)); return
 
-    return (
-        '<div class="table-scroll"><table class="row-table">'
-        '<thead><tr>'
-        '<th style="width:36px;">✓</th>'
-        '<th style="width:44px;">#</th>'
-        '<th style="width:60px;">Group</th>'
-        '<th style="width:120px;">Orientation</th>'
-        '<th>Profile</th>'
-        '<th style="width:80px;">BYD</th>'
-        '<th style="width:80px;">Type</th>'
-        '</tr></thead><tbody>'
-        + "\n".join(html_rows)
-        + '</tbody></table></div>'
-    )
+        self.hdr = hdr; self.rows = rows; self.source_file = source
+        self.rows_backup = None
+        self.output_csv = ""
+        self.convert_log = []
+        self.selected = set()
+        self.female_ids = set()
+        self.converted_ids = set()
+        self.id_to_row = {}
+        self.id_to_idx = {}
+        self.iid_list = []
+        self.visible_iids = []
+        self.filter_var.set("")  # clear filter on new load
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for i, row in enumerate(rows):
+            rid = safe(row, COL_ID) or str(i)
+            female = is_female(row)
+            if female:
+                self.female_ids.add(rid)
+                self.selected.add(rid)   # auto-select
+            self.id_to_row[rid] = row
+            self.id_to_idx[rid] = i
+
+            if rid in self.selected:   tag = "sel"
+            elif female:               tag = "female"
+            elif i % 2 == 0:           tag = "norm"
+            else:                      tag = "alt"
+
+            chk  = "☑" if rid in self.selected else ("☐" if female else "")
+            prof = safe(row, COL_INFO)
+            rest_parts = [safe(row, j) for j in range(len(row))
+                          if j not in (COL_ID, COL_CODE, COL_INFO, COL_ORIENT,
+                                       COL_DATA1, COL_DATA2)]
+            rest = "  ".join(p for p in rest_parts if p)[:80]
+
+            self.tree.insert("", "end", iid=rid, tags=(tag,),
+                values=(chk, str(i+1).zfill(3), safe(row, COL_DATA1),
+                        safe(row, COL_ORIENT), prof[:50],
+                        safe(row, COL_CODE), safe(row, COL_DATA2), rest))
+            self.iid_list.append(rid)
+
+        self.visible_iids = list(self.iid_list)
+        self.last_click = None
+        self.dl_btn.config(state="disabled")
+        self.cp_btn.config(state="disabled")
+        self.undo_btn.config(state="disabled")
+        self.result_lbl.config(text="")
+        self._update_counts()
+
+        lbl = os.path.basename(source) if source else "pasted content"
+        fem = len(self.female_ids)
+        self.status_var.set(
+            f"Loaded: {lbl}   |   {len(rows)} rows   |   "
+            f"{fem} Female Channel rows highlighted and pre-selected")
+
+    def _clear(self):
+        self.rows = []; self.hdr = None; self.selected = set()
+        self.female_ids = set(); self.converted_ids = set()
+        self.id_to_row = {}; self.id_to_idx = {}
+        self.iid_list = []; self.visible_iids = []
+        self.output_csv = ""; self.source_file = ""
+        self.rows_backup = None; self.convert_log = []
+        self.filter_var.set("")
+        for item in self.tree.get_children(): self.tree.delete(item)
+        self.dl_btn.config(state="disabled")
+        self.cp_btn.config(state="disabled")
+        self.undo_btn.config(state="disabled")
+        self.result_lbl.config(text=""); self._update_counts()
+        self.status_var.set("No file loaded.")
+
+    # ── CONVERT ───────────────────────────────────────────────────────────────
+    def _convert(self):
+        if not self.rows:
+            messagebox.showwarning("No Data", "Load a file first."); return
+        if not self.selected:
+            messagebox.showwarning("Nothing Selected", "Select rows to convert."); return
+
+        # Backup for undo
+        self.rows_backup = copy.deepcopy(self.rows)
+        backup_female = set(self.female_ids)
+        backup_selected = set(self.selected)
+        backup_converted = set(self.converted_ids)
+        self._undo_state = (backup_female, backup_selected, backup_converted)
+
+        converted, log = do_convert(self.hdr, self.rows, self.selected, self._byd_map())
+        self.rows = converted
+        self.convert_log = log
+        self.output_csv = write_csv(self.hdr, converted)
+
+        # Update id_to_row mapping and mark converted rows
+        newly_converted = set()
+        for entry in log:
+            rid = entry["id"]
+            newly_converted.add(rid)
+            self.converted_ids.add(rid)
+
+        # Update id_to_row for converted rows
+        for i, row in enumerate(self.rows):
+            rid = safe(row, COL_ID) or str(i)
+            self.id_to_row[rid] = row
+
+        # Recalculate female_ids (converted rows are no longer female)
+        self.female_ids = set()
+        for i, row in enumerate(self.rows):
+            rid = safe(row, COL_ID) or str(i)
+            if is_female(row):
+                self.female_ids.add(rid)
+
+        # Clear selection of converted rows
+        self.selected -= newly_converted
+
+        # Refresh tree display
+        self._apply_filter()
+
+        fixed = sum(1 for c in log if c["ok"])
+        warn  = sum(1 for c in log if not c["ok"])
+        self.dl_btn.config(state="normal")
+        self.cp_btn.config(state="normal")
+        self.undo_btn.config(state="normal")
+        self.result_lbl.config(
+            text=f"  {fixed} rows converted.  "
+                 f"{'%d missing BYD mapping.' % warn if warn else 'Ready to download.'}",
+            fg=self.T["amber"] if warn else self.T["green"])
+        self.status_var.set(
+            f"Converted {fixed} rows.  "
+            f"{'%d warnings.' % warn if warn else 'Click Download to save.'}")
+
+        # Show diff log
+        if log:
+            self._show_diff_log(log)
+
+    def _undo(self):
+        if self.rows_backup is None:
+            return
+        self.rows = self.rows_backup
+        self.rows_backup = None
+
+        # Restore state
+        if hasattr(self, "_undo_state"):
+            self.female_ids, self.selected, self.converted_ids = self._undo_state
+            del self._undo_state
+
+        # Rebuild id_to_row
+        for i, row in enumerate(self.rows):
+            rid = safe(row, COL_ID) or str(i)
+            self.id_to_row[rid] = row
+
+        self.output_csv = ""
+        self.convert_log = []
+        self.undo_btn.config(state="disabled")
+        self.dl_btn.config(state="disabled")
+        self.cp_btn.config(state="disabled")
+        self.result_lbl.config(text="  Undo complete.", fg=self.T["blue"])
+        self._apply_filter()
+        self.status_var.set("Conversion undone. Original data restored.")
+
+    def _show_diff_log(self, log):
+        T = self.T
+        dlg = tk.Toplevel(self); dlg.title("Conversion Diff Log")
+        dlg.configure(bg=T["bg"]); dlg.geometry("700x400"); dlg.grab_set()
+
+        tk.Label(dlg, text="CONVERSION RESULTS",
+                 bg=T["bg"], fg=T["white"],
+                 font=("Courier New", 11, "bold"), pady=8, padx=14).pack(anchor="w")
+
+        fixed = sum(1 for c in log if c["ok"])
+        warn  = sum(1 for c in log if not c["ok"])
+        tk.Label(dlg,
+                 text=f"Converted: {fixed}    Warnings: {warn}    Total: {len(log)}",
+                 bg=T["bg"], fg=T["text_dim"],
+                 font=("Courier New", 9), padx=14).pack(anchor="w")
+
+        tk.Frame(dlg, bg=T["border"], height=1).pack(fill="x", pady=6)
+
+        # Diff treeview
+        cols_d = ("status", "row", "old_byd", "new_byd", "old_profile", "new_profile")
+        dtree = ttk.Treeview(dlg, columns=cols_d, show="headings",
+                             style="T.Treeview", height=14)
+        for cid, txt, w in [("status","",30), ("row","Row",50),
+                             ("old_byd","Old BYD",80), ("new_byd","New BYD",80),
+                             ("old_profile","Old Profile",200), ("new_profile","New Profile",200)]:
+            dtree.heading(cid, text=txt)
+            dtree.column(cid, width=w, minwidth=w, anchor="w")
+
+        dtree.tag_configure("ok",   foreground=T["green"])
+        dtree.tag_configure("warn", foreground=T["amber"])
+
+        for entry in log:
+            tag = "ok" if entry["ok"] else "warn"
+            status = "✓" if entry["ok"] else "⚠"
+            new_byd = entry["new"] if entry["new"] else "(none)"
+            dtree.insert("", "end", tags=(tag,),
+                values=(status, entry["id"], entry["old"], new_byd,
+                        entry.get("old_info", ""), entry.get("new_info", "")))
+
+        dtree.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        self._btn(dlg, "CLOSE", T["amber"], "black", dlg.destroy
+                  ).pack(pady=(0, 10))
+
+    def _suggested_filename(self):
+        base = os.path.basename(self.source_file) if self.source_file else "output.csv"
+        return "corrected_" + base
+
+    def _download(self):
+        if not self.output_csv:
+            messagebox.showwarning("Nothing to Save", "Run conversion first."); return
+        path = filedialog.asksaveasfilename(
+            title="Save Corrected CSV",
+            initialdir=self.last_dir,
+            initialfile=self._suggested_filename(),
+            defaultextension=".csv",
+            filetypes=[("CSV file", "*.csv"), ("All files", "*.*")])
+        if not path: return
+        self.last_dir = os.path.dirname(path)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(self.output_csv)
+        messagebox.showinfo("Saved", f"Saved:\n{os.path.basename(path)}")
+        self.status_var.set(f"Saved  ->  {os.path.basename(path)}")
+
+    def _copy(self):
+        if not self.output_csv: return
+        self.clipboard_clear(); self.clipboard_append(self.output_csv)
+        self.status_var.set("Copied to clipboard.")
+
+    # ── BYD EDITOR WINDOW ─────────────────────────────────────────────────────
+    def _byd_window(self):
+        T = self.T
+        dlg = tk.Toplevel(self); dlg.title("BYD Code Mapping")
+        dlg.configure(bg=T["bg"]); dlg.geometry("600x320"); dlg.grab_set()
+        tk.Label(dlg, text="FEMALE CHANNEL  ->  BOX HEADER  BYD MAPPING",
+                 bg=T["bg"], fg=T["text_dim"],
+                 font=("Courier New", 9), pady=8, padx=14).pack(anchor="w")
+        tk.Frame(dlg, bg=T["border"], height=1).pack(fill="x")
+        frm = tk.Frame(dlg, bg=T["bg"], padx=16, pady=10); frm.pack()
+        for col, lbl in enumerate(("PROFILE", "FEMALE BYD", "", "BOX HEADER BYD")):
+            tk.Label(frm, text=lbl, bg=T["bg"], fg=T["dim"],
+                     font=("Courier New", 8)
+                     ).grid(row=0, column=col, padx=6, pady=(0,6), sticky="w")
+        for r, (old, new) in enumerate(DEFAULT_BYD_MAP.items(), 1):
+            if old not in self.byd_vars:
+                self.byd_vars[old] = tk.StringVar(value=new)
+            tk.Label(frm, text=BYD_LABELS.get(old, old),
+                     bg=T["bg"], fg=T["text_dim"],
+                     font=("Courier New", 9), width=30, anchor="w"
+                     ).grid(row=r, column=0, padx=6, pady=2, sticky="w")
+            tk.Label(frm, text=old, bg=T["bg"], fg=T["amber"],
+                     font=("Courier New", 10, "bold"), width=8
+                     ).grid(row=r, column=1, padx=4)
+            tk.Label(frm, text=" ->", bg=T["bg"], fg=T["dim"],
+                     font=("Courier New", 10)).grid(row=r, column=2, padx=2)
+            tk.Entry(frm, textvariable=self.byd_vars[old],
+                     bg=T["entry_bg"], fg=T["green"],
+                     insertbackground=T["green"], relief="flat",
+                     font=("Courier New", 11, "bold"),
+                     highlightthickness=1, highlightbackground=T["border"], width=10
+                     ).grid(row=r, column=3, padx=6, pady=2, ipady=3, sticky="w")
+        br = tk.Frame(dlg, bg=T["bg"], pady=8, padx=14); br.pack(fill="x")
+
+        def _reset():
+            for k, v in DEFAULT_BYD_MAP.items():
+                self.byd_vars[k].set(v)
+
+        self._btn(br, "RESET DEFAULTS", T["bg3"], T["dim"], _reset).pack(side="left", padx=(0, 8))
+        self._btn(br, "CLOSE", T["amber"], "black", dlg.destroy).pack(side="left")
+
+    # ── WIDGET HELPER ─────────────────────────────────────────────────────────
+    def _btn(self, parent, text, bg, fg, cmd):
+        return tk.Button(parent, text=text, bg=bg, fg=fg,
+                         activebackground=bg, relief="flat",
+                         font=("Courier New", 10, "bold"),
+                         cursor="hand2", padx=12, pady=5, command=cmd)
 
 
-# ─── ROW SELECTION VIA CHECKBOXES ────────────────────────────────────────────
-# Since we can't do click-to-toggle on raw HTML, provide per-row checkboxes
-# for female rows using Streamlit native controls.
-
-st.markdown("#### 📋 Row Data")
-
-# Use an expander with the table for visual display,
-# and then a multiselect for actual row selection.
-
-# Show the HTML table as a visual reference
-table_html = build_table_html(
-    rows, female_ids, selected,
-    filter_text, show_female,
-)
-st.markdown(table_html, unsafe_allow_html=True)
-
-# Row selection via multiselect (only female rows are selectable)
-if female_ids:
-    st.markdown("##### Select Female Channel Rows to Convert")
-
-    # Build options: show row # + profile info for context
-    fem_options = {}
-    for i, row in enumerate(rows):
-        rid = safe(row, COL_ID) or str(i)
-        if rid in female_ids:
-            info = safe(row, COL_INFO)
-            orient = safe(row, COL_ORIENT)
-            group = safe(row, COL_DATA1)
-            fem_options[rid] = f"Row {int(rid):>3d}  |  {group:>4s}  |  {orient:<12s}  |  {info[:40]}"
-
-    # Current selection
-    current_sel = [rid for rid in fem_options if rid in selected]
-
-    new_sel = st.multiselect(
-        "Selected rows for conversion",
-        options=list(fem_options.keys()),
-        default=current_sel,
-        format_func=lambda x: fem_options.get(x, x),
-        label_visibility="collapsed",
-    )
-    st.session_state.selected = set(new_sel)
-
-
-# ─── CONVERT ──────────────────────────────────────────────────────────────────
-st.markdown("---")
-
-convert_cols = st.columns([2, 1, 1])
-
-with convert_cols[0]:
-    sel_count = len(st.session_state.selected)
-    can_convert = sel_count > 0 and not st.session_state.converted
-    btn_label = f"⚡ CONVERT  →  BOX HEADER  ({sel_count} rows)" if sel_count else "⚡ No rows selected"
-
-    if st.button(btn_label, type="primary", disabled=not can_convert, use_container_width=True):
-        # Save backup for undo
-        st.session_state.rows_backup = copy.deepcopy(st.session_state.rows)
-
-        converted_rows, log = do_convert(
-            st.session_state.hdr,
-            st.session_state.rows,
-            st.session_state.selected,
-            st.session_state.byd_map,
-        )
-        st.session_state.rows = converted_rows
-        st.session_state.convert_log = log
-        st.session_state.output_csv = rows_to_csv(st.session_state.hdr, converted_rows)
-        st.session_state.converted = True
-        st.rerun()
-
-with convert_cols[1]:
-    if st.session_state.rows_backup is not None:
-        if st.button("↩ Undo Conversion", use_container_width=True):
-            st.session_state.rows = st.session_state.rows_backup
-            st.session_state.rows_backup = None
-            st.session_state.output_csv = ""
-            st.session_state.convert_log = []
-            st.session_state.converted = False
-            # Re-detect female rows after undo
-            female_ids = set()
-            for i, row in enumerate(st.session_state.rows):
-                rid = safe(row, COL_ID) or str(i)
-                if is_female(row):
-                    female_ids.add(rid)
-            st.session_state.female_ids = female_ids
-            st.session_state.selected = set(female_ids)
-            st.rerun()
-
-with convert_cols[2]:
-    if st.button("🗑 Clear All Data", use_container_width=True):
-        for key in ["hdr", "rows", "rows_backup", "selected", "female_ids",
-                     "source_name", "output_csv", "convert_log", "converted"]:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.rerun()
-
-
-# ─── CONVERSION RESULTS ──────────────────────────────────────────────────────
-if st.session_state.converted and st.session_state.convert_log:
-    log = st.session_state.convert_log
-    ok_count = sum(1 for e in log if e["ok"])
-    warn_count = sum(1 for e in log if not e["ok"])
-
-    st.markdown("#### 📊 Conversion Results")
-
-    res_cols = st.columns(3)
-    with res_cols[0]:
-        st.metric("Rows Converted", ok_count)
-    with res_cols[1]:
-        st.metric("Missing BYD Mapping", warn_count)
-    with res_cols[2]:
-        st.metric("Total Processed", len(log))
-
-    # Diff table
-    diff_rows_html = []
-    for entry in log:
-        status = "✅" if entry["ok"] else "⚠️"
-        old_cls = "diff-old"
-        new_cls = "diff-new" if entry["ok"] else "diff-warn"
-        new_display = entry["new"] if entry["new"] else "(no mapping)"
-
-        diff_rows_html.append(
-            f'<tr>'
-            f'<td>{status}</td>'
-            f'<td>Row {entry["id"]}</td>'
-            f'<td class="{old_cls}">{entry["old"]}</td>'
-            f'<td class="{new_cls}">{new_display}</td>'
-            f'</tr>'
-        )
-
-    st.markdown(
-        '<table class="diff-table">'
-        '<thead><tr><th></th><th>Row</th><th>Old BYD</th><th>New BYD</th></tr></thead>'
-        '<tbody>' + "\n".join(diff_rows_html) + '</tbody></table>',
-        unsafe_allow_html=True,
-    )
-
-
-# ─── DOWNLOAD ─────────────────────────────────────────────────────────────────
-if st.session_state.output_csv:
-    st.markdown("---")
-    st.markdown("#### 💾 Download")
-
-    source = st.session_state.source_name or "output.csv"
-    base = os.path.basename(source)
-    suggested = f"corrected_{base}" if not base.startswith("corrected_") else base
-
-    dl_cols = st.columns([2, 1])
-    with dl_cols[0]:
-        st.download_button(
-            label="⬇ Download Corrected CSV",
-            data=st.session_state.output_csv,
-            file_name=suggested,
-            mime="text/csv",
-            type="primary",
-            use_container_width=True,
-        )
-    with dl_cols[1]:
-        if st.button("📋 Copy to Clipboard Info", use_container_width=True):
-            st.code(st.session_state.output_csv[:500] + "\n... (truncated)", language=None)
-            st.info("Use the download button above — clipboard copy requires the browser to handle the downloaded file.")
-
-    # Preview
-    with st.expander("👁 Preview output CSV (first 20 lines)"):
-        lines = st.session_state.output_csv.split("\n")[:20]
-        st.code("\n".join(lines), language=None)
-
-
-# ─── FOOTER ───────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(
-    '<div style="text-align:center;color:#444;font-family:Courier New,monospace;font-size:0.75rem;">'
-    'Sunspace Modular Enclosures  |  Box Header CSV Editor v6.0  |  '
-    'Dealer Desktop → SC220 Pipeline'
-    '</div>',
-    unsafe_allow_html=True,
-)
+if __name__ == "__main__":
+    App().mainloop()
